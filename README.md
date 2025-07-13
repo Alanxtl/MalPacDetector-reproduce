@@ -170,7 +170,7 @@ boldface means the best hyperparameter value of the model.
 - Training and Validation Results: Model training and validation results are stored in `trainging/result` directory, which named `***_validation.csv`, where `***` represents model name.
 
 ## Contact
-Since the paper not having been published, and for security reasons, we can't place the malicious package dataset here. If you need the dataset, please send a request to **hust_jian@hust.edu.cn**.
+Since the paper not having been published, and for security reasons, we can't place the malicious package dataset here. If you need the dataset, please send a request to **hust_jianw@hust.edu.cn**.
 
 Any bug report or improvement suggestions will be appreciated. Please kindly cite our paper if you use the code or data in your work.
 
