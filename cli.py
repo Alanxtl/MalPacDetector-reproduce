@@ -4,6 +4,10 @@ import argparse
 import traceback
 import json
 import tarfile
+import zipfile
+import subprocess
+import hashlib
+from pathlib import Path
 
 from training import (
     PreprocessMethodEnum,
@@ -16,6 +20,82 @@ from training import (
     predict_package_RF
 )
 from conf import SETTINGS
+from standard_pipeline import add_standard_eval_parser, run_standard_eval
+
+
+ARCHIVE_EXTS = (".tar.gz", ".tgz", ".tar", ".zip")
+CACHE_COMPLETE_MARKER = ".extract-complete"
+
+
+def sha1_short(path: Path, length: int = 8) -> str:
+    sha1 = hashlib.sha1()
+    with path.open("rb") as f:
+        for chunk in iter(lambda: f.read(1024 * 1024), b""):
+            sha1.update(chunk)
+    return sha1.hexdigest()[:length]
+
+
+def _remove_dir_if_exists(path: Path) -> None:
+    if path.exists():
+        shutil.rmtree(path, ignore_errors=True)
+
+
+def find_archives(root: Path):
+    for p in root.rglob("*"):
+        if p.is_file():
+            lower = p.name.lower()
+            for ext in ARCHIVE_EXTS:
+                if lower.endswith(ext):
+                    yield p
+                    break
+
+
+def safe_extract_tar(tar_path: Path, dest: Path):
+    with tarfile.open(tar_path, "r:*") as tf:
+        tf.extractall(dest)
+
+
+def safe_extract_zip(zip_path: Path, dest: Path, pwd: str = "infected"):
+    z = zipfile.ZipFile(zip_path)
+    try:
+        z.extractall(path=dest, pwd=pwd.encode())
+    except RuntimeError:
+        try:
+            z.extractall(path=dest)
+        except Exception:
+            try:
+                subprocess.run(
+                    ["unzip", "-o", str(zip_path), "-d", str(dest)],
+                    check=True,
+                    stdout=subprocess.DEVNULL,
+                    stderr=subprocess.DEVNULL,
+                )
+            except Exception as e:
+                raise e
+    finally:
+        z.close()
+
+
+def extract_archive_raw(archive_path: Path, tmpdir: Path) -> Path:
+    outdir = tmpdir / (archive_path.stem + "_" + sha1_short(archive_path))
+    staging_dir = tmpdir / f".{outdir.name}.partial"
+    _remove_dir_if_exists(outdir)
+    _remove_dir_if_exists(staging_dir)
+    staging_dir.mkdir(parents=True, exist_ok=False)
+    try:
+        if archive_path.suffix.lower() == ".zip" or archive_path.name.lower().endswith(
+            ".zip"
+        ):
+            safe_extract_zip(archive_path, staging_dir)
+        else:
+            safe_extract_tar(archive_path, staging_dir)
+        staging_dir.replace(outdir)
+    except Exception:
+        _remove_dir_if_exists(staging_dir)
+        _remove_dir_if_exists(outdir)
+        raise
+
+    return outdir
 
 
 def load_settings():
@@ -66,44 +146,53 @@ def decompress_packages(dataset_path: str, use_cache: bool = False) -> str:
     Returns:
         Path of decompressed dataset.
     """
-    temp_base_path = os.path.abspath(f'.decompressed-packages')
-    temp_dataset_path = os.path.abspath(os.path.join(temp_base_path, os.path.basename(dataset_path)))
+    temp_base_path = Path(".decompressed-packages").resolve()
+    dataset_root = Path(dataset_path).resolve()
+    temp_dataset_path = temp_base_path / dataset_root.name
+    cache_marker_path = temp_dataset_path / CACHE_COMPLETE_MARKER
 
-    if use_cache and os.path.exists(temp_dataset_path):
-        return temp_dataset_path
-    if os.path.exists(temp_dataset_path):
+    if use_cache and temp_dataset_path.exists() and cache_marker_path.exists():
+        return str(temp_dataset_path)
+    if use_cache and temp_dataset_path.exists() and not cache_marker_path.exists():
+        print(f'Warning: Ignore incomplete cache at {temp_dataset_path}.')
+    if temp_dataset_path.exists():
         try:
             shutil.rmtree(temp_dataset_path)
         except PermissionError:
             print(f'Error: Delete temp dataset folder {temp_dataset_path} failed.')
             traceback.print_exc()
-            add_mode(temp_dataset_path)
+            add_mode(str(temp_dataset_path))
             shutil.rmtree(temp_dataset_path)
-    os.makedirs(temp_dataset_path)
-    dataset_names = os.listdir(dataset_path)
-    for counter, file_name in enumerate(dataset_names):
-        print(f'{counter + 1}/{len(dataset_names)}: Decompressing {file_name}...')
-        file_path = os.path.join(dataset_path, file_name)
+    temp_dataset_path.mkdir(parents=True, exist_ok=True)
+
+    archives = list(find_archives(dataset_root))
+    failures = []
+    for counter, archive_path in enumerate(archives):
+        print(f'{counter + 1}/{len(archives)}: Decompressing {archive_path.name}...')
         try:
-            # decompress .tar.gz file
-            if file_name.endswith('.tar.gz'):
-                tar = tarfile.open(file_path)
-                temp_package_path = f'{temp_dataset_path}/{file_name[:-7]}'
-                os.makedirs(temp_package_path, exist_ok=True)
-                tar.extractall(path=temp_package_path)
-                tar.close()
-            # decompress .tgz file
-            elif file_name.endswith('.tgz'):
-                tar = tarfile.open(file_path)
-                temp_package_path = f'{temp_dataset_path}/{file_name[:-4]}'
-                os.makedirs(temp_package_path, exist_ok=True)
-                tar.extractall(path=temp_package_path)
-                tar.close()
-        except Exception:
-            print(f'Error: Decompress the package {file_name} failed.')
+            extract_archive_raw(archive_path, temp_dataset_path)
+        except Exception as exc:
+            print(f'Error: Decompress the package {archive_path.name} failed.')
             traceback.print_exc()
-    add_mode(temp_dataset_path)
-    return temp_dataset_path
+            failures.append((archive_path, exc))
+
+    if failures:
+        if cache_marker_path.exists():
+            cache_marker_path.unlink()
+        add_mode(str(temp_dataset_path))
+        failure_summary = "; ".join(
+            f"{archive_path.name}: {exc}" for archive_path, exc in failures
+        )
+        raise RuntimeError(
+            f"Failed to extract {len(failures)} archive(s): {failure_summary}"
+        )
+
+    cache_marker_path.write_text(
+        json.dumps({"archive_count": len(archives)}),
+        encoding="utf-8",
+    )
+    add_mode(str(temp_dataset_path))
+    return str(temp_dataset_path)
 
 def extract_cli():
     """Extract features from given dataset."""
@@ -111,7 +200,12 @@ def extract_cli():
     use_cache = args.cache
     for dataset_name in dataset_names:
         dataset_path = os.path.join(SETTINGS['path']['datasets'], dataset_name)
-        dataset_path = os.path.abspath(decompress_packages(dataset_path, use_cache))
+        try:
+            dataset_path = os.path.abspath(decompress_packages(dataset_path, use_cache))
+        except Exception:
+            print(f'Error: Decompress dataset {dataset_name} failed.')
+            traceback.print_exc()
+            exit(1)
         if not os.path.exists(dataset_path):
             print(f'Error: Dataset path {dataset_path} not found!')
             exit(1)
@@ -150,6 +244,7 @@ def train_cli():
     model_name = args.model
     preprocess_method = args.preprocess
     action_name = args.action
+    groundtruth_path = args.groundtruth
     malicous_csv_dir_paths = []
     benign_csv_dir_paths = []
     for malicious_dataset_name in malicious_dataset_names:
@@ -197,7 +292,16 @@ def train_cli():
     elif model_name == 'RF':
         model = ModelEnum.RF
 
-    train(malicous_csv_dir_paths, benign_csv_dir_paths, preprocess, model, action, hyperparameters)
+    train(
+        malicous_csv_dir_paths,
+        benign_csv_dir_paths,
+        preprocess,
+        model,
+        action,
+        hyperparameters,
+        groundtruth_path=groundtruth_path,
+        smote=args.smote,
+    )
 
 def predict_cli():
     """Predict packages."""
@@ -292,6 +396,8 @@ if __name__ == '__main__':
     parser_train.add_argument('-o', '--model', type=str, required=True, help='model name', choices=MODEL_NAMES)
     parser_train.add_argument('-p', '--preprocess', type=str, required=True, help='preprocess method', choices=PREPROCESS_METHOD_NAMES)
     parser_train.add_argument('-a', '--action', type=str, required=True, help='action', choices=['training', 'save'])
+    parser_train.add_argument('-g', '--groundtruth', type=str, help='path of malicious groundtruth jsonl')
+    parser_train.add_argument('--smote', action='store_true', help='apply SMOTE on training data')
 
     # NB
     parser_train.add_argument('-hs', '--hyper-smoothing', type=float, help='smoothing of NB', choices=settings['classifier']['hyperparameters']['NB']['smoothings'])
@@ -316,6 +422,7 @@ if __name__ == '__main__':
     parser_predict.add_argument('-o', '--model', type=str, required=True, help='model name', choices=MODEL_NAMES)
     parser_predict.add_argument('-d', '--dataset', type=str, help='dataset name', choices=FEATURE_NAMES, nargs='+')
     parser_predict.add_argument('-p', '--package-path', type=str, help='absolute package path')
+    add_standard_eval_parser(subparsers)
 
     args = parser.parse_args()
 
@@ -332,3 +439,5 @@ if __name__ == '__main__':
         else:
             print('Error: Please specify package path or model name!')
             exit(1)
+    elif subparser_name == 'standard-eval':
+        run_standard_eval(args)

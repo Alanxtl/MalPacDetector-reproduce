@@ -1,3 +1,4 @@
+import csv
 import os
 
 import numpy
@@ -6,17 +7,20 @@ from sklearn.metrics import confusion_matrix
 from sklearn.neural_network import MLPClassifier
 from prettytable import PrettyTable
 
-from .commons import table_path, field_names,classifier_save_path, scoring
+from .commons import table_path, field_names, classifier_save_path, scoring
+from .model_util import compute_type_detection_rates
 from .pickle_util import save_classifier
 from conf import SETTINGS
 
 
-def train_MLP_validation(X_train: numpy.ndarray, y_train: numpy.ndarray):
+def train_MLP_validation(X_train: numpy.ndarray, y_train: numpy.ndarray, type_labels=None, stratify_labels=None):
    """Train the MLP model and validate it using cross validation.
    
    Args:
       X_train: The training set.
       y_train: The labels of the training set.
+      type_labels: Malicious type list per sample.
+      stratify_labels: Labels used for stratified splitting.
    """
    layer_sizes = [(i,) for i in SETTINGS['classifier']['hyperparameters']['MLP']['number_of_hidden_units']]
    activations = SETTINGS['classifier']['hyperparameters']['MLP']['activation_functions']
@@ -30,6 +34,17 @@ def train_MLP_validation(X_train: numpy.ndarray, y_train: numpy.ndarray):
 
    k = 4
    skf = StratifiedKFold(n_splits=k, shuffle=True, random_state=10)
+   cv_splits = skf
+   if stratify_labels is not None:
+      label_counts = {}
+      for label in stratify_labels:
+         label_counts[label] = label_counts.get(label, 0) + 1
+      if min(label_counts.values()) >= k:
+         cv_splits = list(skf.split(X_train, stratify_labels))
+      else:
+         print('Warning: Not enough samples per malicious type for stratified CV; falling back to label stratification.')
+   type_rows = []
+   type_rates_path = os.path.join(table_path, "MLP_validation_types.csv")
 
    with open(validation_path, "w+") as f:
       for layer_size in layer_sizes:
@@ -38,11 +53,19 @@ def train_MLP_validation(X_train: numpy.ndarray, y_train: numpy.ndarray):
                for learn_rate_init in learning_rates:
                   for max_iter in number_of_iterations:
                         model = MLPClassifier(hidden_layer_sizes=layer_size, solver=solver, random_state=21, max_iter=max_iter, learning_rate_init=learn_rate_init, activation=activation)
-                        scores = cross_validate(model, X_train, y_train, cv=skf, scoring=scoring)
-                        y_pred = cross_val_predict(model, X_train, y_train, cv = skf)
+                        scores = cross_validate(model, X_train, y_train, cv=cv_splits, scoring=scoring)
+                        y_pred = cross_val_predict(model, X_train, y_train, cv=cv_splits)
                         tn, fp, fn, tp = confusion_matrix(y_train, y_pred).ravel()
                         table.add_row([f'layer_size = {layer_size}; activation={activation}; solver={solver};learn_rate_int={learn_rate_init};max_iter={max_iter}',tp,fp,tn,fn, scores["test_accu"].mean(), scores["test_prec"].mean(), scores["test_rec"].mean(), scores["test_f1"].mean(), scores["test_matt_cor"].mean()])
+                        if type_labels is not None:
+                           for malicious_type, detected, total, rate in compute_type_detection_rates(y_train, y_pred, type_labels):
+                              type_rows.append([f'layer_size = {layer_size}; activation={activation}; solver={solver};learn_rate_int={learn_rate_init};max_iter={max_iter}', malicious_type, detected, total, rate])
       f.write(table.get_csv_string())
+   if type_labels is not None:
+      with open(type_rates_path, "w", newline="") as type_file:
+         writer = csv.writer(type_file)
+         writer.writerow(["hyperparamter", "type", "detected", "total", "rate"])
+         writer.writerows(type_rows)
 
 def save_MLP(X_train: numpy.ndarray, y_train: numpy.ndarray, learning_rate: float, number_of_hidden_units: tuple, number_of_iterations: int, optimization: str, activation: str):
    """Save the MLP model trained on the whole training set.

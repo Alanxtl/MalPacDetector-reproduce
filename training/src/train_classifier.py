@@ -1,4 +1,7 @@
 from enum import Enum
+import random
+from typing import Optional
+from collections import Counter
 
 from sklearn.preprocessing import StandardScaler, MinMaxScaler
 
@@ -9,6 +12,7 @@ from .train_RF import train_classifier_RF_Validation, save_RF
 from .train_SVM import train_SVM_validate, save_SVM
 from .pickle_util import save_scaler
 from .commons import rf_scaler_save_path, mlp_scaler_save_path, nb_scaler_save_path, svm_scaler_save_path
+from .groundtruth import load_malicious_type_map, _normalize_package_name
 
 
 class PreprocessMethodEnum(Enum):
@@ -29,7 +33,41 @@ class ActionEnum(Enum):
     TRAINING = 1
     SAVE = 2
 
-def train(malcious_features_dir_paths: [], normal_features_dir_paths: [], preprocess_method: PreprocessMethodEnum, model: ModelEnum, action: ActionEnum, hyperparameters={}):
+
+def _oversample_rare_types(X_train, y_train, type_labels, stratify_labels, min_per_type=4, seed=10):
+    """Duplicate samples so each malicious type has at least min_per_type samples."""
+    label_to_indices = {}
+    for idx, label in enumerate(stratify_labels):
+        if label in ("benign", "UNKNOWN"):
+            continue
+        label_to_indices.setdefault(label, []).append(idx)
+
+    rng = random.Random(seed)
+    added = 0
+    for label, indices in label_to_indices.items():
+        if len(indices) >= min_per_type:
+            continue
+        need = min_per_type - len(indices)
+        for _ in range(need):
+            pick = rng.choice(indices)
+            X_train.append(X_train[pick])
+            y_train.append(y_train[pick])
+            type_labels.append(type_labels[pick])
+            stratify_labels.append(stratify_labels[pick])
+            added += 1
+    if added:
+        print(f'Info: Duplicated {added} malicious samples to balance rare types.')
+
+def train(
+    malcious_features_dir_paths: [],
+    normal_features_dir_paths: [],
+    preprocess_method: PreprocessMethodEnum,
+    model: ModelEnum,
+    action: ActionEnum,
+    hyperparameters={},
+    groundtruth_path: Optional[str] = None,
+    smote: bool = False,
+):
     """Train the model.
     
     Args:
@@ -39,19 +77,56 @@ def train(malcious_features_dir_paths: [], normal_features_dir_paths: [], prepro
         model: The model to be trained.
         action: The action to be performed.
         hyperparameters: The hyperparameters of the model.
+        groundtruth_path: The path of the jsonl groundtruth for malicious types.
     """
 
     X_train = []
     y_train = []
+    type_labels = None
+    stratify_labels = None
+    type_map = None
+    primary_type_map = None
+    missing_type_count = 0
+    missing_type_names = []
+    if groundtruth_path:
+        type_map, primary_type_map = load_malicious_type_map(groundtruth_path)
+        type_labels = []
+        stratify_labels = []
     for malcious_features_dir_path in malcious_features_dir_paths:
-        [X, y, _] = read_features(malcious_features_dir_path, None)
+        [X, y, feature_names] = read_features(malcious_features_dir_path, None)
         X_train += X
         y_train += y
+        if type_labels is not None:
+            for feature_name in feature_names:
+                base_name = feature_name[:-4] if feature_name.endswith(".csv") else feature_name
+                base_key = _normalize_package_name(base_name)
+                types = type_map.get(base_key, [])
+                primary_type = primary_type_map.get(base_key, "UNKNOWN")
+                if base_key not in type_map:
+                    missing_type_count += 1
+                    if len(missing_type_names) < 50:
+                        missing_type_names.append(base_name)
+                type_labels.append(types)
+                stratify_labels.append(primary_type)
     for normal_features_dir_path in normal_features_dir_paths:
-        [X, y, _] = read_features(None, normal_features_dir_path)
+        [X, y, feature_names] = read_features(None, normal_features_dir_path)
         X_train += X
         y_train += y
+        if type_labels is not None:
+            for _ in feature_names:
+                type_labels.append([])
+                stratify_labels.append("benign")
 
+    if missing_type_count:
+        print(f'Warning: {missing_type_count} malicious samples have no groundtruth type.')
+        if missing_type_names:
+            preview = ", ".join(missing_type_names[:10])
+            print(f'Info: Missing type examples (up to 10): {preview}')
+    if y_train:
+        label_counts = Counter(y_train)
+        print(f'Info: Training label counts: {dict(label_counts)}')
+    if type_labels is not None:
+        _oversample_rare_types(X_train, y_train, type_labels, stratify_labels, min_per_type=4)
 
     # preprocess
     if model == ModelEnum.RF:
@@ -63,17 +138,28 @@ def train(malcious_features_dir_paths: [], normal_features_dir_paths: [], prepro
     elif model == ModelEnum.SVM:
         scaler_save_path = svm_scaler_save_path
     [X_train] = preprocess(X_train, scaler_save_path, preprocess_method)
+    if smote:
+        try:
+            from imblearn.over_sampling import SMOTE
+        except Exception:
+            raise RuntimeError("SMOTE requested but imbalanced-learn is not installed.")
+        smote_sampler = SMOTE(random_state=42)
+        X_train, y_train = smote_sampler.fit_resample(X_train, y_train)
+        if stratify_labels is not None or type_labels is not None:
+            stratify_labels = None
+            type_labels = None
+            print("Info: Disabled type-based validation after SMOTE to keep sample sizes aligned.")
 
     # training and validation
     if action == ActionEnum.TRAINING:
         if model == ModelEnum.RF:
-            train_classifier_RF_Validation(X_train, y_train)
+            train_classifier_RF_Validation(X_train, y_train, type_labels=type_labels, stratify_labels=stratify_labels)
         elif model == ModelEnum.MLP:
-            train_MLP_validation(X_train, y_train)
+            train_MLP_validation(X_train, y_train, type_labels=type_labels, stratify_labels=stratify_labels)
         elif model == ModelEnum.NB:
-            train_NB_Validate(X_train, y_train)
+            train_NB_Validate(X_train, y_train, type_labels=type_labels, stratify_labels=stratify_labels)
         elif model == ModelEnum.SVM:
-            train_SVM_validate(X_train, y_train)
+            train_SVM_validate(X_train, y_train, type_labels=type_labels, stratify_labels=stratify_labels)
 
     # save model
     elif action == ActionEnum.SAVE:

@@ -3,19 +3,22 @@ import os
 
 
 def normalize_feature(value):
-    """Normalize the feature value.
-    
-    Args:
-        value: The feature value.
-
-    Returns:
-        The normalized feature value.
-    """
-    if value == "true":
-        value = True
-    elif value == "false":
-        value = False
-    return value
+    """Normalize the feature value to numeric types where possible."""
+    if value is None:
+        return 0
+    text = str(value).strip()
+    lower = text.lower()
+    if lower == "true":
+        return 1
+    if lower == "false":
+        return 0
+    try:
+        return int(text)
+    except ValueError:
+        try:
+            return float(text)
+        except ValueError:
+            return text
 
 def read_feature_from_file(feature_file_path):
     """Read the feature from a file.

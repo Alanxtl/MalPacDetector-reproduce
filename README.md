@@ -1,177 +1,149 @@
-# MalPacDetector
+# MalPacDetector Reproduction
 
-This repository hosts dataset *MalnpmDB* and malicious package detector *MalPacDetector* involved in the paper *MalPacDetector: An LLM-based Malicious npm Package Detector*.
+This repository is a runnable reproduction of:
 
-## Requirements
-### Environment
-- Operating System: Ubuntu 22.04
-- Python: Python 3.10.12
-- node.js: node.js v18.16.0
+> MalPacDetector: An LLM-based Malicious npm Package Detector
 
-## Setup
-```sh
-$ python3 configure.py
-```
-Follow the tooltips to configure the project. You can configure:
-- datasets path: Where to find npm packages. (default: datasets/MalnpmDB)
-- models path: Where to save trained models. (default: models)
-- reports path: Where to save prediction result reports. (default: reports)
-- features: Where to save extracted features. (default: features)
-- feature-positions: Where to save code line position information of extracted features. (default: feature-positions)
+MalPacDetector combines Node.js feature extraction with Python machine-learning classifiers for NPM malicious-package detection. The standardized evaluation entry point is:
 
-And, then use the following command to setup the project.
-```sh
-$ ./setup.sh
+```text
+cli.py standard-eval
 ```
 
-Once you setup the project, you will see the following folders:
-- conf: containing configuration and settings files.
-- datasets: containing MalnpmDB dataset.
-- feature-extract: containing feature extraction code files.
-- training: containing training and prediction code files.
+It consumes explicit train/test split manifests, extracts features, trains the selected classifier, evaluates on the test split, and writes `metrics.json`.
 
-If you using default configuration, you will see the following folders as well:
-- models: containing trained machine learning models.
-- reports: containing npm packages prediction reports.
-- features: containing npm packages' features extracted by feature extractor.
-- feature-positions: containing feature position information .
+## Environment
 
-## Usage
+Recommended versions:
 
-At first, you should activate python virtual environment:
-```sh
-$ source env/bin/activate
+- Windows or Ubuntu 22.04
+- Python 3.10
+- Node.js 18.x or newer
+- npm
+
+### Windows PowerShell
+
+```powershell
+uv python install 3.10
+uv sync
+
+cd .\feature-extract
+npm install
+npm run compile
+cd ..
 ```
 
-And there is a main python script file:
-- cli.py: for training a machine learning model and predicting npm packages. By specifying different paramaters, users can training different models or predicting different packages.
+### Linux / WSL
 
-The paramaters available for performing a training or predicting task, which are listed below:
+```bash
+uv python install 3.10
+uv sync
 
-|Options|Description|
-|---|---|
-| -h | Show all help information. |
-| extract | Extract features. |
-| -h | Show help information about extracting features. |
-| -d | npm dataset name. |
-| train | Train model. |
-| -h | Show help information about training models. |
-| -m | Malicious npm dataset name. |
-| -b | Benign npm dataset name. |
-| -o | Model used to train. ("NB", "MLP", "RF", "SVM")|
-| -p | Preprocess method. ("none", "standardlize", "min-max-scale")|
-| -a | Trainging or saving model. (training, save) |
-| -hs | smoothing of NB to save. |
-| -hr | Learning rate of MLP to save. |
-| -hl | Number of layers of MLP to save. |
-| -hi | Number of iterations of MLP to save. |
-| -ho | Optimization algorithm of MLP to save. |
-| -ha | Activation funtion of MLP to save. |
-| -he | Number of decision trees of RF to save. |
-| -hd | Maxium depth of RF to save. |
-| -hg | Gamma of SVM to save. |
-| -hc | C of SVM to save. |
-| predict | Predict npm packages. |
-| -h | Show help information about predicting npm pacakges. |
-| -o | Model used to predict. |
-| -d | npm dataset which stored gzip formatted npm packages. |
-| -p | npm package directory path. |
-
-For convenience, use the following command to show help information.
-```sh
-# Show all help information.
-$ python3 cli.py -h
-
-# Show help information about extracting features.
-$ python3 cli.py extract -h
-
-# Show help information about training models.
-$ python3 cli.py train -h
-
-# Show help information about predicting npm dataset.
-$ python3 cli.py predict -h
+cd feature-extract
+npm install
+npm run compile
+cd ..
 ```
 
-### Step 1: Extract features from npm dataset
-The paramater related to model settings are presented in above table's field *extract*. The npm dataset should obey the following structure:
+`.venv/`, `env/`, feature outputs, reports, and results are ignored by git and can remain in the repository.
 
-```sh
-dataset_name
-|__ <package_name-package_version1>.tar.gz
-|__ <package_name-package_version2>.tar.gz
-|__ ...
-|__ <package_name-package_versionn>.tar.gz
+## Configuration
+
+The original project uses `conf/settings.json` for default locations:
+
+- `datasets`: package dataset root
+- `models`: saved model directory
+- `reports`: prediction reports
+- `features`: extracted feature files
+- `feature-positions`: source-code position records
+
+For standardized evaluation, `standard-eval` creates and manages its own output directory, so you usually do not need to run `configure.py`.
+
+## Inputs
+
+Required inputs for standard evaluation:
+
+- `--split-dir`: contains `train_manifest.json` and `test_manifest.json`.
+- `--benign-train-dir` or `--benign-train-manifest`.
+- `--benign-test-dir` or `--benign-test-manifest`.
+- `--out-dir`: output directory.
+
+Optional:
+
+- `--groundtruth-jsonl`: annotation JSONL used for subgroup reports.
+- `--model`: `NB`, `MLP`, `RF`, or `SVM`.
+- `--preprocess`: `none`, `standardlize`, or `min-max-scale`.
+
+## Run Standard Evaluation
+
+PowerShell:
+
+```powershell
+uv run .\cli.py standard-eval `
+  --split-dir C:\path\to\split `
+  --benign-train-dir C:\path\to\benign\train `
+  --benign-test-dir C:\path\to\benign\test `
+  --groundtruth-jsonl C:\path\to\annotations.jsonl `
+  --out-dir .\results\standard_eval `
+  --model RF `
+  --preprocess none `
+  --materialize hardlink
 ```
 
-The compressed package should have the following structure which is the formal npm structure:
-```sh
-package_name-package_version
-|__ package
-   |__ package.json
-   |__ ...
+Linux / WSL:
+
+```bash
+uv run cli.py standard-eval \
+  --split-dir /path/to/split \
+  --benign-train-dir /path/to/benign/train \
+  --benign-test-dir /path/to/benign/test \
+  --groundtruth-jsonl /path/to/annotations.jsonl \
+  --out-dir ./results/standard_eval \
+  --model RF \
+  --preprocess none \
+  --materialize hardlink
 ```
 
-Use the following command to extract features from npm dataset.
-```sh
-$ python3 cli.py extract -d <dataset_name>
+Useful options:
+
+- `--materialize`: `copy`, `hardlink`, or `symlink`.
+- `--smote`: enable SMOTE oversampling.
+- `--model`: `RF` is the default; other supported values are `NB`, `MLP`, and `SVM`.
+
+## Outputs
+
+The output directory contains materialized package sets, feature files, model artifacts, predictions, and:
+
+```text
+metrics.json
 ```
 
-### Step 2: Train a classifier
-The paramater related to model settings are stored in `conf/settings.json`, and are presented in above table's field *train*. This allows user to conveniently train different models or use different datasets.
+`metrics.json` contains the binary classification metrics for the selected split.
 
-Use the following command to train a classifier.
-```sh
-$ python3 cli.py train -a training -m <malicious_dataset_name> -b <benign_dataset_name> -p <preprocess_method> -o <model_name>
+## Original CLI
+
+The original project CLI is still available:
+
+```powershell
+uv run .\cli.py -h
+uv run .\cli.py extract -h
+uv run .\cli.py train -h
+uv run .\cli.py predict -h
 ```
 
-### Step 3: Save the classifier
-The paramater related to model settings are stored in `conf/settings.json`, and are presented in above table's field *train*.
+Typical original workflow:
 
-Use the following command to train a classifier.
-```sh
-# NB
-$ python3 cli.py train -a save -m <malicious_dataset_name> -b <benign_dataset_name> -p <preprocess_method> -o <model_name> -hs <smoothing>
-
-# MLP
-$ python3 cli.py train -a save -m <malicious_dataset_name> -b <benign_dataset_name> -p <preprocess_method> -o <model_name> -hr <learning_rate> -hl <number_of_layers> -hi <number_of_iterations> -ho <optimization_algorithm> -ha <activation_function>
-
-# RF
-$ python3 cli.py train -a save -m <malicious_dataset_name> -b <benign_dataset_name> -p <preprocess_method> -o <model_name> -he <number_of_decision_trees> -hd <maxium_depth>
-
-# SVM
-$ python3 cli.py train -a save -m <malicious_dataset_name> -b <benign_dataset_name> -p <preprocess_method> -o <model_name> -hg <Gamma> -hc <C>
+```powershell
+uv run .\cli.py extract -d <dataset_name>
+uv run .\cli.py train -a training -m <malicious_dataset_name> -b <benign_dataset_name> -p none -o RF
+uv run .\cli.py predict -o RF -d <dataset_name>
 ```
 
-### Step 4: Predict npm packages
-The paramater related to model settings are presented in above table's field *predict*.
+For controlled comparisons, prefer `standard-eval`.
 
-Use the following command to predict packages.
-```sh
-$ python3 cli.py predict -o <model_name> -d <dataset_name>
-```
+## Common Issues
 
-For convenience, you can just use one command to pass above steps to predict a single package.
-```sh
-$ python3 cli.py predict -o <model_name> -p <package_path>
-```
-
-## Hyperparameters
-Hyperparameter values of the 4 classifiers, where
-boldface means the best hyperparameter value of the model.
-| Model | Hyperparameter |
-| ---- | ---- |
-| NB | Smoothing terms: (1e-9, 1e-8, 1e-7, 1e-6, 1e-5, **1e-4**) |
-| MLP | Learning rate: 5 values randomly selected from a uniform distribution with the interval [0.01, 0.2] (**0.0505**)<br>Number of hidden units: (**16**, 32, 100, 150)<br>Number of iterations: (**400**, 600)<br>Optimization algorithm: (lbfgs, **adam**) |
-| RF | Number of decision trees: (16, **32**, 64, 100, 128, 256, 512)<br>Maximum depth: (3, 5, 7, **11**, 15) |
-| SVM | Gamma: (scale, auto, 3 values randomly selected from a normal distribution with mean 0.2 and standard deviation 0.075) (**scale**)<br>C: 3 values randomly selected from a uniform distribution with the [0.5, 2.0] (**1.0704**) |
-
-## Dataset and Results
-- Dataset: Containing malicious dataset *mal* and benign dataset *ben* in `datasets/MalnpmDB` which has 3258 and 4051 packages respectively.
-- Training and Validation Results: Model training and validation results are stored in `trainging/result` directory, which named `***_validation.csv`, where `***` represents model name.
-
-## Contact
-Since the paper not having been published, and for security reasons, we can't place the malicious package dataset here. If you need the dataset, please send a request to **hust_jianw@hust.edu.cn**.
-
-Any bug report or improvement suggestions will be appreciated. Please kindly cite our paper if you use the code or data in your work.
-
-Thanks!
+- `npm run compile` fails: make sure Node.js and npm are installed and rerun inside `feature-extract/`.
+- Feature extraction produces no rows: confirm archives are valid npm package archives and contain `package/package.json` or a recognizable package root.
+- Hardlink materialization fails across drives: use `--materialize copy`.
+- Existing `models/*.pkl` are tracked legacy artifacts; `.gitignore` only affects new untracked model outputs.
